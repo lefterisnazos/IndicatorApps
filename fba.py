@@ -80,7 +80,7 @@ def mergeDailyPredictionsInto15Min(df_15m: pd.DataFrame, df_pred: pd.DataFrame) 
 def findMostRecentHit(merged_15m: pd.DataFrame) -> (str, float):
     """
     Scan from newest to oldest 15-min bar. Check if lr_plus_2, lr_minus_2, or lr_value
-    is in [low, high]. Priority: +2σ, -2σ, mean.
+    is in [low, high]. Priority: +2σ, -2σ, mean. That how we define the band_hit
     Return (whichLine, lineVal) or (None,None).
     """
     if merged_15m.empty:
@@ -88,6 +88,7 @@ def findMostRecentHit(merged_15m: pd.DataFrame) -> (str, float):
 
     for i in range(len(merged_15m)-1, -1, -1):
         row = merged_15m.iloc[i]
+
         low_, high_ = row['low'], row['high']
         plus_ = row['lr_plus_2']
         minus_ = row['lr_minus_2']
@@ -114,14 +115,13 @@ def compareToCurrentBar(merged_15m: pd.DataFrame, whichLine: str, lineVal: float
         return "N/A"
 
     latest = merged_15m.iloc[-1]
-    avg_15m = (latest['open'] + latest['high'] + latest['low'] + latest['close']) / 4.0
-    from_below = (avg_15m > lineVal)
+    latest_custom_price = (latest['open'] + latest['high'] + latest['low'] + latest['close']) / 4.0
     lineVal = np.round(lineVal, 2)
 
-    if whichLine in ("lr_plus_2", "lr_minus_2"):
-        return f'++{lineVal}' if from_below else f'--{lineVal}'
-    else:
-        return f'+{lineVal}' if from_below else f'-{lineVal}'
+    if whichLine in ('lr_plus_2', 'lr_minus_2'):
+        return f'--{lineVal}' if latest_custom_price > lineVal else f'++{lineVal}'
+    elif whichLine == 'lr_value':
+        return f'-{lineVal}' if latest_custom_price > lineVal else f'+{lineVal}'
 
 
 ###############################################################################
