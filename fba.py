@@ -49,6 +49,7 @@ def computeDailyRegressions(df_daily: pd.DataFrame, lb: int) -> pd.DataFrame:
     df_pred['lr_value'] = y_pred
     df_pred['lr_plus_2'] = df_pred['lr_value'] + 2*sigma
     df_pred['lr_minus_2'] = df_pred['lr_value'] - 2*sigma
+    df_pred.index = pd.to_datetime(df_pred.index)
     return df_pred
 
 
@@ -61,7 +62,7 @@ def mergeDailyPredictionsInto15Min(df_15m: pd.DataFrame, df_pred: pd.DataFrame) 
         return pd.DataFrame()
 
     # Match time zones (if df_15m is tz-aware)
-    if df_15m.index.tz is not None:
+    if df_15m.index.tz is not None and df_pred.index.tz is None:
         df_pred.index = pd.to_datetime(df_pred.index).tz_localize(df_15m.index.tz)
 
     df_15m = df_15m.sort_index()
@@ -252,7 +253,7 @@ class MainWindow(qt.QWidget):
         self.timer = QTimer()
         self.timer.setInterval(15*60*1000)  # 15 min
         self.timer.timeout.connect(self.onComputeSignals)
-        # self.timer.start()  # optionally start auto updates
+        #self.timer.start()  # optionally start auto updates
 
     def onConnectClicked(self):
         if self.ib.isConnected():
