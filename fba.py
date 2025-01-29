@@ -43,14 +43,14 @@ def computeDailyRegressions(df_daily: pd.DataFrame, lb: int) -> pd.DataFrame:
     model = sm.OLS(closes, X).fit()
     y_pred = model.predict(X)
     residuals = closes - y_pred
-    sigma = np.std(residuals)
+    sigma = np.std(closes)
 
     df_pred = pd.DataFrame(index=recent.index)
     df_pred['lr_value'] = y_pred
     df_pred['lr_plus_2'] = df_pred['lr_value'] + 2*sigma
     df_pred['lr_minus_2'] = df_pred['lr_value'] - 2*sigma
     df_pred.index = pd.to_datetime(df_pred.index)
-    return df_pred
+    return df_pred, sigma
 
 
 def mergeDailyPredictionsInto15Min(df_15m: pd.DataFrame, df_pred: pd.DataFrame) -> pd.DataFrame:
@@ -116,11 +116,12 @@ def compareToCurrentBar(merged_15m: pd.DataFrame, whichLine: str, lineVal: float
     latest = merged_15m.iloc[-1]
     avg_15m = (latest['open'] + latest['high'] + latest['low'] + latest['close']) / 4.0
     from_below = (avg_15m > lineVal)
+    lineVal = np.round(lineVal, 2)
 
     if whichLine in ("lr_plus_2", "lr_minus_2"):
-        return "++" if from_below else "--"
+        return f'++{lineVal}' if from_below else f'--{lineVal}'
     else:
-        return "+" if from_below else "-"
+        return f'+{lineVal}' if from_below else f'-{lineVal}'
 
 
 ###############################################################################
@@ -130,7 +131,8 @@ class TickerTable(qt.QTableWidget):
     headers = [
         'Symbol', 'Last',
         'ShortLB', 'MedLB', 'LongLB',
-        'ShortSignal', 'MediumSignal', 'LongSignal'
+        'ShortSignal', 'MediumSignal', 'LongSignal',
+        'ShortLR_Diff', 'MediumLR_Diff', 'LongLR_Diff'
     ]
 
     def __init__(self, parent=None):
@@ -165,14 +167,50 @@ class TickerTable(qt.QTableWidget):
 
         self.resizeColumnsToContents()
 
-    def onPendingTickers(self, tickers):
+    def onPendingTickers(self, tickers, lr_dict):
+        """
+        Called whenever real-time data arrives.
+        Additionally, we'll update the ShortLR_Diff, MediumLR_Diff, LongLR_Diff
+        based on last price vs. the last daily regression (lr_value, sigma).
+        """
         for t in tickers:
             row = self.conId2Row.get(t.contract.conId)
             if row is not None and t.last is not None:
+                # update the Last cell
                 last_item = self.item(row, 1)
                 last_item.setText(f"{t.last:.2f}")
 
+                # Now if we have LR info, compute difference in multiples of sigma
+                lr_info = lr_dict.get(t.contract.conId)
+                if lr_info:
+
+                    shortVal, shortSigma = lr_info.get("short", (None, None))
+                    medVal, medSigma     = lr_info.get("medium", (None, None))
+                    longVal, longSigma   = lr_info.get("long", (None, None))
+
+                    self._updateDiffCell(row, 8, t.last, shortVal, shortSigma)
+                    self._updateDiffCell(row, 9, t.last, medVal,   medSigma)
+                    self._updateDiffCell(row, 10, t.last, longVal, longSigma)
+
+    def _updateDiffCell(self, row: int, col: int, lastPrice: float, lrVal: float, sigma: float):
+        """
+        if we have valid lrVal and sigma, do: diff = (last - lrVal)/sigma => e.g. +2.0σ
+        else '-'
+        """
+        if (lrVal is not None) and (sigma is not None) and (sigma != 0.0):
+            diffSigma = (lastPrice - lrVal) / sigma
+            txt = f"{diffSigma:+.2f}σ"
+        else:
+            txt = "-"
+        item = self.item(row, col)
+        if item is None:
+            item = QTableWidgetItem(txt)
+            self.setItem(row, col, item)
+        else:
+            item.setText(txt)
+
     def setSignals(self, conId, shortSig, medSig, longSig):
+
         row = self.conId2Row.get(conId)
         if row is None:
             return
@@ -201,6 +239,7 @@ class MainWindow(qt.QWidget):
 
     def __init__(self, host='127.0.0.1', port=7497, clientId=1):
         super().__init__()
+
         self.ib = IB()
         self.ib.pendingTickersEvent += self.onPendingTickers
 
@@ -213,6 +252,7 @@ class MainWindow(qt.QWidget):
         #   "longPred":  df_long
         # }
         self.regressions_dict = {}
+        self.lrLatest = {}
 
         # UI
         self.connectBtn = QPushButton("Connect")
@@ -255,6 +295,8 @@ class MainWindow(qt.QWidget):
         self.timer.timeout.connect(self.onComputeSignals)
         #self.timer.start()  # optionally start auto updates
 
+
+
     def onConnectClicked(self):
         if self.ib.isConnected():
             self.ib.disconnect()
@@ -280,7 +322,7 @@ class MainWindow(qt.QWidget):
         self.addEdit.clear()
 
     def onPendingTickers(self, tickers):
-        self.table.onPendingTickers(tickers)
+        self.table.onPendingTickers(tickers, self.lrLatest)
 
     ###########################################################################
     # Step 1: "Update Regressions"
@@ -346,10 +388,18 @@ class MainWindow(qt.QWidget):
                 continue
 
             df_daily.set_index('date', inplace=True)
-            df_short = computeDailyRegressions(df_daily, shortLB)
-            df_med   = computeDailyRegressions(df_daily, medLB)
-            df_long  = computeDailyRegressions(df_daily, longLB)
+            df_short, sigma_short = computeDailyRegressions(df_daily, shortLB)
+            df_med, sigma_med   = computeDailyRegressions(df_daily, medLB)
+            df_long, sigma_long  = computeDailyRegressions(df_daily, longLB)
 
+            # for storing most recent lr_values, along with the sigma, for each lookback reg
+            self.lrLatest[conId] = {
+                "short": (df_short.iloc[-1]['lr_value'], sigma_short),
+                "medium": (df_med.iloc[-1]['lr_value'], sigma_med),
+                "long": (df_long.iloc[-1]['lr_value'], sigma_long)
+            }
+
+            # for storing the dataframe predictions of regression of the X values used for fitting
             self.regressions_dict[conId] = {
                 "shortPred": df_short,
                 "medPred":   df_med,
