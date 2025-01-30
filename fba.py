@@ -27,14 +27,17 @@ def make_duration_str(days: int) -> str:
         return f"{years} Y"
 
 
-def computeDailyRegressions(df_daily: pd.DataFrame, lb: int) -> pd.DataFrame:
+def computeDailyRegressions(df_daily: pd.DataFrame, lb: int):
     """
-    1) Slices the last `lb` rows of df_daily,
-    2) Performs OLS => returns a DataFrame with [lr_value, lr_plus_2, lr_minus_2].
-    If insufficient data => empty DF.
+    1) Slice last `lb` rows of df_daily.
+    2) OLS => returns (df_pred, sigma):
+       df_pred has columns [lr_value, lr_plus_2, lr_minus_2],
+       plus we also return 'sigma' used to define ±2σ.
+
+    If insufficient data => (empty DF, None).
     """
     if df_daily is None or df_daily.empty or len(df_daily) < lb or lb < 5:
-        return pd.DataFrame()
+        return (pd.DataFrame(), None)
 
     recent = df_daily.tail(lb).copy()
     closes = recent['close'].values
@@ -42,15 +45,16 @@ def computeDailyRegressions(df_daily: pd.DataFrame, lb: int) -> pd.DataFrame:
     X = sm.add_constant(X)
     model = sm.OLS(closes, X).fit()
     y_pred = model.predict(X)
+    # We estimate sigma from residuals
     residuals = closes - y_pred
-    sigma = np.std(closes)
+    sigma = np.std(residuals)
 
     df_pred = pd.DataFrame(index=recent.index)
     df_pred['lr_value'] = y_pred
-    df_pred['lr_plus_2'] = df_pred['lr_value'] + 2*sigma
-    df_pred['lr_minus_2'] = df_pred['lr_value'] - 2*sigma
+    df_pred['lr_plus_2'] = df_pred['lr_value'] + 2 * sigma
+    df_pred['lr_minus_2'] = df_pred['lr_value'] - 2 * sigma
     df_pred.index = pd.to_datetime(df_pred.index)
-    return df_pred, sigma
+    return (df_pred, sigma)
 
 
 def mergeDailyPredictionsInto15Min(df_15m: pd.DataFrame, df_pred: pd.DataFrame) -> pd.DataFrame:
@@ -80,27 +84,23 @@ def mergeDailyPredictionsInto15Min(df_15m: pd.DataFrame, df_pred: pd.DataFrame) 
 def findMostRecentHit(merged_15m: pd.DataFrame) -> (str, float):
     """
     Scan from newest to oldest 15-min bar. Check if lr_plus_2, lr_minus_2, or lr_value
-    is in [low, high]. Priority: +2σ, -2σ, mean. That how we define the band_hit
-    Return (whichLine, lineVal) or (None,None).
+    is in [low, high]. Priority: +2σ, -2σ, mean.
+    Return (whichLine, lineVal) or (None, None).
     """
     if merged_15m.empty:
         return (None, None)
 
-    for i in range(len(merged_15m)-1, -1, -1):
+    for i in range(len(merged_15m) - 1, -1, -1):
         row = merged_15m.iloc[i]
-
         low_, high_ = row['low'], row['high']
         plus_ = row['lr_plus_2']
         minus_ = row['lr_minus_2']
         mean_ = row['lr_value']
 
-        # check plus_2 first
         if low_ <= plus_ <= high_:
             return ("lr_plus_2", plus_)
-        # minus_2
         if low_ <= minus_ <= high_:
             return ("lr_minus_2", minus_)
-        # mean
         if low_ <= mean_ <= high_:
             return ("lr_value", mean_)
 
@@ -109,30 +109,45 @@ def findMostRecentHit(merged_15m: pd.DataFrame) -> (str, float):
 
 def compareToCurrentBar(merged_15m: pd.DataFrame, whichLine: str, lineVal: float) -> str:
     """
-    Compare lineVal to the *latest* 15-min bar's average => '++','--','+','-' or 'N/A'.
+    Compare lineVal to the *latest* 15-min bar's average => a string like "++119.97" or "--122.20", etc.
+    If no line is found => "N/A".
     """
     if not whichLine or merged_15m.empty:
         return "N/A"
 
     latest = merged_15m.iloc[-1]
-    latest_custom_price = (latest['open'] + latest['high'] + latest['low'] + latest['close']) / 4.0
-    lineVal = np.round(lineVal, 2)
+    avg_15m = (latest['open'] + latest['high'] + latest['low'] + latest['close']) / 4.0
 
+    lineVal = np.round(lineVal, 2)
+    # We'll show e.g. "++120.33" if current bar < lineVal, or "--120.33" if bar > lineVal
     if whichLine in ('lr_plus_2', 'lr_minus_2'):
-        return f'--{lineVal}' if latest_custom_price > lineVal else f'++{lineVal}'
-    elif whichLine == 'lr_value':
-        return f'-{lineVal}' if latest_custom_price > lineVal else f'+{lineVal}'
+        return f"--{lineVal}" if (avg_15m > lineVal) else f"++{lineVal}"
+    else:
+        # lr_value
+        return f"-{lineVal}" if (avg_15m > lineVal) else f"+{lineVal}"
 
 
 ###############################################################################
 # TickerTable
 ###############################################################################
 class TickerTable(qt.QTableWidget):
+    """
+    Only 8 columns:
+      0 Symbol
+      1 Last
+      2 ShortLB
+      3 MedLB
+      4 LongLB
+      5 ShortSignal
+      6 MediumSignal
+      7 LongSignal
+
+    We'll embed the "±Xσ" real-time difference inside the ShortSignal/MediumSignal/LongSignal cells themselves.
+    """
     headers = [
         'Symbol', 'Last',
         'ShortLB', 'MedLB', 'LongLB',
-        'ShortSignal', 'MediumSignal', 'LongSignal',
-        'ShortLR_Diff', 'MediumLR_Diff', 'LongLR_Diff'
+        'ShortSignal', 'MediumSignal', 'LongSignal'
     ]
 
     def __init__(self, parent=None):
@@ -146,7 +161,7 @@ class TickerTable(qt.QTableWidget):
     def __contains__(self, contract):
         return contract.conId in self.conId2Row
 
-    def addTickerRow(self, ticker, shortLB=20, medLB=60, longLB=120):
+    def addTickerRow(self, ticker, shortLB=20, medLB=150, longLB=220):
         conId = ticker.contract.conId
         row = self.rowCount()
         self.insertRow(row)
@@ -154,11 +169,10 @@ class TickerTable(qt.QTableWidget):
 
         for col in range(len(self.headers)):
             item = QTableWidgetItem('-')
-            if col in (2,3,4):  # shortLB, medLB, longLB
+            if col in (2, 3, 4):  # shortLB, medLB, longLB
                 item.setFlags(item.flags() | Qt.ItemIsEditable)
             self.setItem(row, col, item)
 
-        # fill basic info
         self.item(row, 0).setText(ticker.contract.symbol)  # Symbol
         self.item(row, 1).setText('-')  # Last
         self.item(row, 2).setText(str(shortLB))
@@ -169,54 +183,76 @@ class TickerTable(qt.QTableWidget):
 
     def onPendingTickers(self, tickers, lr_dict):
         """
-        Called whenever real-time data arrives.
-        Additionally, we'll update the ShortLR_Diff, MediumLR_Diff, LongLR_Diff
-        based on last price vs. the last daily regression (lr_value, sigma).
+        Called whenever real-time data arrives (ib.pendingTickersEvent).
+        Also update ShortSignal/MediumSignal/LongSignal with the "±Xσ" difference appended.
         """
         for t in tickers:
             row = self.conId2Row.get(t.contract.conId)
-            if row is not None and t.last is not None:
-                # update the Last cell
+            if row is None:
+                continue
+
+            lastp = t.last
+            if lastp is not None:
+                # update the 'Last' column
                 last_item = self.item(row, 1)
-                last_item.setText(f"{t.last:.2f}")
+                last_item.setText(f"{lastp:.2f}")
 
-                # Now if we have LR info, compute difference in multiples of sigma
+                # If we have lr info for this conId, compute difference in sigma
+                # and append it to the existing short/medium/long signals
                 lr_info = lr_dict.get(t.contract.conId)
+
                 if lr_info:
+                    shortVal, shortSigm = lr_info.get("short", (None, None))
+                    medVal,   medSigm   = lr_info.get("medium", (None, None))
+                    longVal,  longSigm  = lr_info.get("long", (None, None))
 
-                    shortVal, shortSigma = lr_info.get("short", (None, None))
-                    medVal, medSigma     = lr_info.get("medium", (None, None))
-                    longVal, longSigma   = lr_info.get("long", (None, None))
+                    # short:
+                    self._appendSigmaDiff(row, 5, lastp, shortVal, shortSigm)
+                    # med:
+                    self._appendSigmaDiff(row, 6, lastp, medVal, medSigm)
+                    # long:
+                    self._appendSigmaDiff(row, 7, lastp, longVal, longSigm)
 
-                    self._updateDiffCell(row, 8, t.last, shortVal, shortSigma)
-                    self._updateDiffCell(row, 9, t.last, medVal,   medSigma)
-                    self._updateDiffCell(row, 10, t.last, longVal, longSigma)
+        self.resizeColumnsToContents()
 
-    def _updateDiffCell(self, row: int, col: int, lastPrice: float, lrVal: float, sigma: float):
+    def _appendSigmaDiff(self, row: int, col: int, lastPrice: float, lrVal: float, sigma: float):
         """
-        if we have valid lrVal and sigma, do: diff = (last - lrVal)/sigma => e.g. +2.0σ
-        else '-'
+        1. Take the existing cell text, e.g. "++119.97" or "N/A" or "...".
+        2. Remove any old " | ±Xσ" suffix if it exists (split on '|').
+        3. If we have valid lrVal/sigma => compute diffInSigma = (lastPrice - lrVal)/sigma => e.g. +2.0σ
+        4. Rebuild the final string as "BaseSignal | +2.0σ"
         """
-        if (lrVal is not None) and (sigma is not None) and (sigma != 0.0):
-            diffSigma = (lastPrice - lrVal) / sigma
-            txt = f"{diffSigma:+.2f}σ"
-        else:
-            txt = "-"
         item = self.item(row, col)
-        if item is None:
-            item = QTableWidgetItem(txt)
-            self.setItem(row, col, item)
+        if not item:
+            return
+
+        base_text = item.text()
+        # if there's a '|', keep only what's before it
+        if '|' in base_text:
+            base_text = base_text.split('|')[0].strip()
+
+        # If we can't compute a valid diff, just keep the base
+        if (lrVal is None) or (sigma is None) or (sigma == 0.0):
+            new_text = base_text
         else:
-            item.setText(txt)
+            diff_sigma = (lastPrice - lrVal) / sigma
+            diff_str = f"{diff_sigma:+.2f}σ"
+            new_text = f"{base_text} | {diff_str}"
+
+        item.setText(new_text)
 
     def setSignals(self, conId, shortSig, medSig, longSig):
-
+        """
+        After "Compute Signals", we set the textual signals for short/med/long
+        (e.g. "++119.97"). We'll later append the real-time "±Xσ" in onPendingTickers.
+        """
         row = self.conId2Row.get(conId)
         if row is None:
             return
-        self.item(row,5).setText(shortSig)
-        self.item(row,6).setText(medSig)
-        self.item(row,7).setText(longSig)
+        # columns 5,6,7 are short/medium/long signal
+        self.item(row, 5).setText(shortSig)
+        self.item(row, 6).setText(medSig)
+        self.item(row, 7).setText(longSig)
 
     def clearTickers(self):
         self.setRowCount(0)
@@ -228,30 +264,22 @@ class TickerTable(qt.QTableWidget):
 ###############################################################################
 class MainWindow(qt.QWidget):
     """
-    - We have 2 steps:
-       1) "Update Regressions" => fetch daily data, produce short/med/long predictions, store in self.regressions_dict[conId].
-       2) "Compute Signals" => fetch 15-min data, do merges/hits => table signals.
-
-    - If user tries to compute signals without having regressions, we show a message.
-
-    - A QTimer calls 'Compute Signals' automatically every 15 min.
+    1) "Update Regressions" => fetch daily bars, store short/med/long results
+       in self.regressions_dict plus final (lr_value, sigma) in self.lrLatest.
+    2) "Compute Signals" => fetch 15-min bars => short/med/long signals in table.
+    3) "onPendingTickers" => also show ±Xσ difference appended to short/med/long signals.
     """
 
     def __init__(self, host='127.0.0.1', port=7497, clientId=1):
         super().__init__()
-
         self.ib = IB()
         self.ib.pendingTickersEvent += self.onPendingTickers
 
         self.connectInfo = (host, port, clientId)
 
-        # Dictionary to store per-ticker predictions:
-        # self.regressions_dict[conId] = {
-        #   "shortPred": df_short,  # daily lines
-        #   "medPred":   df_med,
-        #   "longPred":  df_long
-        # }
+        # Regressions: self.regressions_dict[conId] = {"shortPred":..., "medPred":..., "longPred":...}
         self.regressions_dict = {}
+        # Latest LR (lr_value + sigma) for short/med/long => used for ±Xσ difference
         self.lrLatest = {}
 
         # UI
@@ -287,15 +315,13 @@ class MainWindow(qt.QWidget):
         bottomLayout.addWidget(self.signalsBtn)
         mainLayout.addLayout(bottomLayout)
 
-        self.setWindowTitle("PyQt + ib_insync: Split Regressions vs. Signals")
+        self.setWindowTitle("PyQt + ib_insync: LR Signals with Real-Time ±σ in the Same Column")
 
         # QTimer for auto signals
         self.timer = QTimer()
-        self.timer.setInterval(15*60*1000)  # 15 min
+        self.timer.setInterval(15 * 60 * 1000)  # 15 min
         self.timer.timeout.connect(self.onComputeSignals)
-        #self.timer.start()  # optionally start auto updates
-
-
+        # self.timer.start()  # optionally start
 
     def onConnectClicked(self):
         if self.ib.isConnected():
@@ -322,16 +348,16 @@ class MainWindow(qt.QWidget):
         self.addEdit.clear()
 
     def onPendingTickers(self, tickers):
+        """
+        Called on every real-time price update. We'll pass self.lrLatest so that
+        the table can append "±Xσ" differences to the existing Short/Med/Long signals.
+        """
         self.table.onPendingTickers(tickers, self.lrLatest)
 
     ###########################################################################
     # Step 1: "Update Regressions"
     ###########################################################################
     def onUpdateRegressions(self):
-        """
-        For each ticker, fetch daily bars (based on largest LB),
-        compute shortPred, medPred, longPred => store in self.regressions_dict[conId].
-        """
         if not self.ib.isConnected():
             print("Not connected.")
             return
@@ -366,7 +392,7 @@ class MainWindow(qt.QWidget):
 
             days_needed = maxLB * 2
             durationStr = make_duration_str(days_needed)
-            print(f"Updating daily regs for {contract.symbol}, LB={shortLB,medLB,longLB}, dur={durationStr}")
+            print(f"Updating daily regs for {contract.symbol} => short={shortLB}, med={medLB}, long={longLB}, dur={durationStr}")
 
             try:
                 daily_bars = self.ib.reqHistoricalData(
@@ -388,33 +414,44 @@ class MainWindow(qt.QWidget):
                 continue
 
             df_daily.set_index('date', inplace=True)
+
             df_short, sigma_short = computeDailyRegressions(df_daily, shortLB)
-            df_med, sigma_med   = computeDailyRegressions(df_daily, medLB)
-            df_long, sigma_long  = computeDailyRegressions(df_daily, longLB)
+            df_med,   sigma_med   = computeDailyRegressions(df_daily, medLB)
+            df_long,  sigma_long  = computeDailyRegressions(df_daily, longLB)
 
-            # for storing most recent lr_values, along with the sigma, for each lookback reg
-            self.lrLatest[conId] = {
-                "short": (df_short.iloc[-1]['lr_value'], sigma_short),
-                "medium": (df_med.iloc[-1]['lr_value'], sigma_med),
-                "long": (df_long.iloc[-1]['lr_value'], sigma_long)
-            }
+            if df_short.empty or df_med.empty or df_long.empty:
+                self.table.setSignals(conId, "NoData", "NoData", "NoData")
+                continue
 
-            # for storing the dataframe predictions of regression of the X values used for fitting
+            # Store the data in memory
             self.regressions_dict[conId] = {
                 "shortPred": df_short,
                 "medPred":   df_med,
                 "longPred":  df_long
             }
-            print(f"{contract.symbol} => updated regressions.")
+
+            # For real-time ±σ diffs:
+            # We'll take the last row's lr_value from each DF, and the sigma from each.
+            # If the DF has at least 1 row, let's do:
+            shortVal = df_short.iloc[-1]['lr_value']
+            medVal   = df_med.iloc[-1]['lr_value']
+            longVal  = df_long.iloc[-1]['lr_value']
+
+            self.lrLatest[conId] = {
+                "short":  (shortVal, sigma_short),
+                "medium": (medVal,   sigma_med),
+                "long":   (longVal,  sigma_long)
+            }
+
+            print(f"Updated regressions for {contract.symbol}")
 
     ###########################################################################
     # Step 2: "Compute Signals"
     ###########################################################################
     def onComputeSignals(self):
         """
-        For each ticker, if we have daily predictions stored,
-        then fetch 15-min bars => merge + find hits => table signals.
-        Otherwise, ask user to "Update Regressions" first.
+        For each ticker, fetch 15-min bars => merges => find hits => set short/med/long signals.
+        The real-time difference in multiples of σ is appended in onPendingTickers (above).
         """
         if not self.ib.isConnected():
             print("Not connected.")
@@ -431,23 +468,19 @@ class MainWindow(qt.QWidget):
                 continue
             contract = found.contract
 
-            # do we have predictions?
             preds = self.regressions_dict.get(conId)
             if not preds:
-                self.table.setSignals(conId, "UpdateFirst", "UpdateFirst", "UpdateFirst")
+                self.table.setSignals(conId, "UpdFirst", "UpdFirst", "UpdFirst")
                 continue
 
             df_short = preds["shortPred"]
             df_med   = preds["medPred"]
             df_long  = preds["longPred"]
-
             if df_short.empty or df_med.empty or df_long.empty:
                 self.table.setSignals(conId, "NoData", "NoData", "NoData")
                 continue
 
-            print(f"Computing signals for {contract.symbol} ...")
-
-            # fetch 15-min bars
+            print(f"Compute Signals => {contract.symbol}")
             try:
                 bars_15 = self.ib.reqHistoricalData(
                     contract,
@@ -474,7 +507,7 @@ class MainWindow(qt.QWidget):
             b_s, v_s = findMostRecentHit(merged_s)
             shortSig = compareToCurrentBar(merged_s, b_s, v_s)
 
-            # med
+            # medium
             merged_m = mergeDailyPredictionsInto15Min(df15, df_med)
             b_m, v_m = findMostRecentHit(merged_m)
             medSig = compareToCurrentBar(merged_m, b_m, v_m)
@@ -485,7 +518,6 @@ class MainWindow(qt.QWidget):
             longSig = compareToCurrentBar(merged_l, b_l, v_l)
 
             self.table.setSignals(conId, shortSig, medSig, longSig)
-            print(f'Computed Signals for {contract.symbol}')
 
     def closeEvent(self, event):
         loop = util.getLoop()
