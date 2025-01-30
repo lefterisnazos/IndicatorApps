@@ -292,9 +292,9 @@ class TickerTable(qt.QTableWidget):
 class MainWindow(qt.QWidget):
     """
     1) "Update Regressions" => fetch daily bars, store short/med/long results
-       in self.regressions_dict plus final (lr_value, sigma) in self.lrLatest.
+       in self.regressions_dict plus final (lr_value, sigma) in self.lrLatest. In that function a part of the indicator
     2) "Compute Signals" => fetch 15-min bars => short/med/long signals in table.
-    3) "onPendingTickers" => also show ±Xσ difference appended to short/med/long signals.
+    3) "onPendingTickers" => Besides updating LastPrice column live, also show ±Xσ difference appended to short/med/long signals.
     """
 
     def __init__(self, host='127.0.0.1', port=7497, clientId=1):
@@ -400,7 +400,7 @@ class MainWindow(qt.QWidget):
         c = self.ib.qualifyContracts(contract)
         if c:
             ticker = self.ib.reqMktData(c[0], '', False, False)
-            self.table.addTickerRow(ticker, shortLB=20, medLB=60, longLB=120)
+            self.table.addTickerRow(ticker, shortLB=20, medLB=120, longLB=220)
         self.addEdit.clear()
 
     def onPendingTickers(self, tickers):
