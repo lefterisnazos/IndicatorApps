@@ -349,7 +349,7 @@ class MainWindow(qt.QWidget):
         bottomLayout.addWidget(self.signalsBtn)
         mainLayout.addLayout(bottomLayout)
 
-        self.setWindowTitle("PyQt + ib_insync: LR Signals with Real-Time ±σ in the Same Column")
+        self.setWindowTitle("price_movement signal from Above/Below LinReg_bands | with Real-Time ±σ values from Regression")
 
         # QTimer for auto signals
         self.timer = QTimer()
