@@ -6,6 +6,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QLineEdit, QWidget, QLabel, QTableWidget
 )
 from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QWheelEvent
 from ib_insync import IB, util, Stock
 import numpy as np
 import pandas as pd
@@ -109,7 +110,7 @@ def findMostRecentHit(merged_15m: pd.DataFrame) -> (str, float):
 
 def compareToCurrentBar(merged_15m: pd.DataFrame, whichLine: str, lineVal: float) -> str:
     """
-    Compare lineVal to the *latest* 15-min bar's average => a string like "++119.97" or "--122.20", etc.
+    Compare lineVal to the *latest* 15-min bar's average to get an indicator => a string like "++119.97" or "--122.20", etc.
     If no line is found => "N/A".
     """
     if not whichLine or merged_15m.empty:
@@ -121,29 +122,19 @@ def compareToCurrentBar(merged_15m: pd.DataFrame, whichLine: str, lineVal: float
     lineVal = np.round(lineVal, 2)
     # We'll show e.g. "++120.33" if current bar < lineVal, or "--120.33" if bar > lineVal
     if whichLine in ('lr_plus_2', 'lr_minus_2'):
-        return f"--{lineVal}" if (avg_15m > lineVal) else f"++{lineVal}"
+        return f"-- {lineVal}" if (avg_15m > lineVal) else f"++ {lineVal}"
     else:
         # lr_value
-        return f"-{lineVal}" if (avg_15m > lineVal) else f"+{lineVal}"
+        return f"- {lineVal}" if (avg_15m > lineVal) else f"+ {lineVal}"
+
+
 
 
 ###############################################################################
 # TickerTable
 ###############################################################################
 class TickerTable(qt.QTableWidget):
-    """
-    Only 8 columns:
-      0 Symbol
-      1 Last
-      2 ShortLB
-      3 MedLB
-      4 LongLB
-      5 ShortSignal
-      6 MediumSignal
-      7 LongSignal
 
-    We'll embed the "±Xσ" real-time difference inside the ShortSignal/MediumSignal/LongSignal cells themselves.
-    """
     headers = [
         'Symbol', 'Last',
         'ShortLB', 'MedLB', 'LongLB',
@@ -153,10 +144,46 @@ class TickerTable(qt.QTableWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.conId2Row = {}
+
+        self._baseFontSize = 10
+        font = self.font()
+        font.setPointSize(self._baseFontSize)
+        self.setFont(font)
+
         self.setColumnCount(len(self.headers))
         self.setHorizontalHeaderLabels(self.headers)
         self.setAlternatingRowColors(True)
         self.setEditTriggers(qt.QAbstractItemView.DoubleClicked)
+
+    def wheelEvent(self, event: QWheelEvent):
+        """
+        If Ctrl is held, interpret the wheel as zoom in/out.
+        Otherwise, do normal scrolling.
+        """
+        modifiers = qt.QApplication.keyboardModifiers()
+        if modifiers & Qt.ControlModifier:
+            angleDeltaY = event.angleDelta().y()
+            if angleDeltaY > 0:
+                # zoom in
+                self._baseFontSize += 1
+            else:
+                # zoom out
+                if self._baseFontSize > 5:
+                    self._baseFontSize -= 1
+
+            # apply new font
+            font = self.font()
+            font.setPointSize(self._baseFontSize)
+            self.setFont(font)
+
+            # optionally auto-resize
+            self.resizeColumnsToContents()
+            self.resizeRowsToContents()
+
+            event.accept()
+        else:
+            # normal scroll
+            super().wheelEvent(event)
 
     def __contains__(self, contract):
         return contract.conId in self.conId2Row
@@ -282,7 +309,14 @@ class MainWindow(qt.QWidget):
         # Latest LR (lr_value + sigma) for short/med/long => used for ±Xσ difference
         self.lrLatest = {}
 
+
         # UI
+        self.fontSize = 10  # or whatever default
+        self.zoomInBtn = QPushButton("Zoom In")
+        self.zoomOutBtn = QPushButton("Zoom Out")
+        self.zoomInBtn.clicked.connect(self.onZoomIn)
+        self.zoomOutBtn.clicked.connect(self.onZoomOut)
+
         self.connectBtn = QPushButton("Connect")
         self.connectBtn.clicked.connect(self.onConnectClicked)
 
@@ -322,6 +356,28 @@ class MainWindow(qt.QWidget):
         self.timer.setInterval(15 * 60 * 1000)  # 15 min
         self.timer.timeout.connect(self.onComputeSignals)
         # self.timer.start()  # optionally start
+
+    def onZoomIn(self):
+        self.fontSize += 1
+        self.applyZoom()
+
+    def onZoomOut(self):
+        if self.fontSize > 5:
+            self.fontSize -= 1
+        self.applyZoom()
+
+    def applyZoom(self):
+        """
+        Update the QTableWidget's font (and optionally row/column sizes)
+        to match self.fontSize.
+        """
+        font = self.table.font()
+        font.setPointSize(self.fontSize)
+        self.table.setFont(font)
+
+        # Optionally resize rows/columns automatically or fix them:
+        self.table.resizeColumnsToContents()
+        self.table.resizeRowsToContents()
 
     def onConnectClicked(self):
         if self.ib.isConnected():
