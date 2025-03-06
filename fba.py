@@ -311,7 +311,7 @@ class MainWindow(qt.QWidget):
 
 
         # UI
-        self.fontSize = 10  # or whatever default
+        self.fontSize = 10
         self.zoomInBtn = QPushButton("Zoom In")
         self.zoomOutBtn = QPushButton("Zoom Out")
         self.zoomInBtn.clicked.connect(self.onZoomIn)
@@ -375,7 +375,7 @@ class MainWindow(qt.QWidget):
         font.setPointSize(self.fontSize)
         self.table.setFont(font)
 
-        # Optionally resize rows/columns automatically or fix them:
+        # resize rows/columns automatically or fix them
         self.table.resizeColumnsToContents()
         self.table.resizeRowsToContents()
 
