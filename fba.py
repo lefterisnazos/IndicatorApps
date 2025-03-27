@@ -333,12 +333,16 @@ class MainWindow(qt.QWidget):
         self.signalsBtn = QPushButton("Compute Signals")
         self.signalsBtn.clicked.connect(self.onComputeSignals)
 
+        self.addPortfolioButton = QPushButton("Add Portfolio tickers")
+        self.addPortfolioButton.clicked.connect(self.onAddPortfolioTickers)
+
         # Layout
         topLayout = QHBoxLayout()
         topLayout.addWidget(self.connectBtn)
         topLayout.addWidget(self.addLabel)
         topLayout.addWidget(self.addEdit)
         topLayout.addWidget(self.addButton)
+        topLayout.addWidget(self.addPortfolioButton)
 
         mainLayout = QVBoxLayout(self)
         mainLayout.addLayout(topLayout)
@@ -409,6 +413,25 @@ class MainWindow(qt.QWidget):
         the table can append "±Xσ" differences to the existing Short/Med/Long signals.
         """
         self.table.onPendingTickers(tickers, self.lrLatest)
+
+    def onAddPortfolioTickers(self):
+        if not self.ib.isConnected():
+            print("Not connected.")
+            return
+        # Get portfolio items; ib.portfolio() returns a list of PortfolioItem objects.
+        portfolioItems = self.ib.portfolio()
+        for item in portfolioItems:
+            contract = item.contract
+            # Skip if already added
+            if contract.conId in self.table.conId2Row:
+                continue
+            # Qualify the contract and request market data
+            c = self.ib.qualifyContracts(contract)
+            if c:
+                ticker = self.ib.reqMktData(c[0], '', False, False)
+                # You can adjust the LB values as needed
+                self.table.addTickerRow(ticker, shortLB=20, medLB=120, longLB=220)
+
 
     ###########################################################################
     # Step 1: "Update Regressions"
