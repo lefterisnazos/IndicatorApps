@@ -210,36 +210,40 @@ class TickerTable(qt.QTableWidget):
 
     def onPendingTickers(self, tickers, lr_dict):
         """
-        Called whenever real-time data arrives (ib.pendingTickersEvent).
-        Also update ShortSignal/MediumSignal/LongSignal with the "±Xσ" difference appended.
+        Update the Last column and the ±σ suffixes for the Short/Medium/Long
+        signal columns.  We use the best available price:
+            real‑time last   →   yesterday's close   →   prevClose snapshot
         """
         for t in tickers:
             row = self.conId2Row.get(t.contract.conId)
             if row is None:
                 continue
 
-            lastp = t.last
-            if lastp is not None:
-                # update the 'Last' column
-                last_item = self.item(row, 1)
-                last_item.setText(f"{lastp:.2f}")
+            # 1.  Decide which price to use -------------------------------
+            price = t.last
+            if price is None or np.isnan(price):
+                price = t.close if t.close is not None and not np.isnan(t.close) else None
+            if price is None or np.isnan(price):
+                price = t.prevClose if t.prevClose is not None and not np.isnan(t.prevClose) else None
 
-                # If we have lr info for this conId, compute difference in sigma
-                # and append it to the existing short/medium/long signals
+            # 2.  Update the “Last” column if we have a price -------------
+            if price is not None and not np.isnan(price):
+                self.item(row, 1).setText(f"{price:.2f}")
+
+            # 3.  Always append the ±σ differences when possible ----------
+            if price is not None and not np.isnan(price):
                 lr_info = lr_dict.get(t.contract.conId)
-
                 if lr_info:
-                    shortVal, shortSigm = lr_info.get("short", (None, None))
-                    medVal,   medSigm   = lr_info.get("medium", (None, None))
-                    longVal,  longSigm  = lr_info.get("long", (None, None))
+                    shortVal, shortSig = lr_info.get("short", (None, None))
+                    medVal, medSig = lr_info.get("medium", (None, None))
+                    longVal, longSig = lr_info.get("long", (None, None))
 
-                    # short:
-                    self._appendSigmaDiff(row, 5, lastp, shortVal, shortSigm)
-                    # med:
-                    self._appendSigmaDiff(row, 6, lastp, medVal, medSigm)
-                    # long:
-                    self._appendSigmaDiff(row, 7, lastp, longVal, longSigm)
+                    # columns: 5 = ShortSignal, 6 = MediumSignal, 7 = LongSignal
+                    self._appendSigmaDiff(row, 5, price, shortVal, shortSig)
+                    self._appendSigmaDiff(row, 6, price, medVal, medSig)
+                    self._appendSigmaDiff(row, 7, price, longVal, longSig)
 
+        # keep the table neat
         self.resizeColumnsToContents()
 
     def _appendSigmaDiff(self, row: int, col: int, lastPrice: float, lrVal: float, sigma: float):
