@@ -11,7 +11,9 @@ from ib_insync import IB, util, Stock
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-
+import functools
+from PyQt5.QtCore import QMetaObject, Qt as QtCoreQt
+from ib_insync import util
 
 ###############################################################################
 # Helper functions
@@ -143,6 +145,7 @@ class TickerTable(qt.QTableWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._dailyCloseCache: dict[int, float] = {}
         self.conId2Row = {}
 
         self._baseFontSize = 10
@@ -208,12 +211,16 @@ class TickerTable(qt.QTableWidget):
 
         self.resizeColumnsToContents()
 
-    def onPendingTickers(self, tickers, lr_dict):
+    def onPendingTickers(self, tickers, lr_dict, ib):
         """
         Update the Last column and the ±σ suffixes for the Short/Medium/Long
         signal columns.  We use the best available price:
             real‑time last   →   yesterday's close   →   prevClose snapshot
         """
+
+        if not hasattr(self, "_dailyCloseCache"):
+            self._dailyCloseCache = {}
+
         for t in tickers:
             row = self.conId2Row.get(t.contract.conId)
             if row is None:
@@ -222,9 +229,26 @@ class TickerTable(qt.QTableWidget):
             # 1.  Decide which price to use -------------------------------
             price = t.last
             if price is None or np.isnan(price):
-                price = t.close if t.close is not None and not np.isnan(t.close) else None
-            if price is None or np.isnan(price):
-                price = t.prevClose if t.prevClose is not None and not np.isnan(t.prevClose) else None
+                conId = t.contract.conId
+                price = self._dailyCloseCache.get(conId)
+
+                if price is None:  # we have never fetched it
+                    try:
+                        bars = ib.reqHistoricalData(
+                            t.contract,
+                            endDateTime='',
+                            durationStr='2 D',  # tiny request – 2 daily bars
+                            barSizeSetting='1 day',
+                            whatToShow='TRADES',
+                            useRTH=False,
+                            keepUpToDate=False
+                        )
+                        if bars:
+                            price = bars[-1].close  # most‑recent daily close
+                            self._dailyCloseCache[conId] = price
+                    except Exception:
+                        # don’t crash the handler on a timeout / data error
+                        price = None
 
             # 2.  Update the “Last” column if we have a price -------------
             if price is not None and not np.isnan(price):
@@ -416,7 +440,7 @@ class MainWindow(qt.QWidget):
         Called on every real-time price update. We'll pass self.lrLatest so that
         the table can append "±Xσ" differences to the existing Short/Med/Long signals.
         """
-        self.table.onPendingTickers(tickers, self.lrLatest)
+        self.table.onPendingTickers(tickers, self.lrLatest, self.ib)
 
     def onAddPortfolioTickers(self):
         if not self.ib.isConnected():
